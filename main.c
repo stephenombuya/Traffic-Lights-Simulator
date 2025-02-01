@@ -6,9 +6,8 @@
 #include <time.h>
 
 #define MAX_INTERSECTIONS 10
-#define RED_DURATION 30
+#define BASE_GREEN_DURATION 20
 #define YELLOW_DURATION 5
-#define GREEN_DURATION 25
 
 typedef enum {
     RED,
@@ -23,7 +22,10 @@ typedef struct {
     bool isActive;
     int traffic_density_ns;
     int traffic_density_ew;
+    int green_ns;
+    int green_ew;
     pthread_mutex_t mutex;
+    pthread_cond_t cond;
 } Intersection;
 
 // Global variables
@@ -34,62 +36,79 @@ int active_intersections = 0;
 void initializeIntersection(int id);
 void* controlIntersection(void* arg);
 void updateTrafficDensity(Intersection* intersection);
+void adjustTiming(Intersection* intersection);
 const char* getStateString(LightState state);
 void displayIntersectionStatus(Intersection* intersection);
 void cleanupIntersection(Intersection* intersection);
+void logStatus(Intersection* intersection);
 
 void initializeIntersection(int id) {
     intersections[id].id = id;
     intersections[id].northSouth = RED;
     intersections[id].eastWest = GREEN;
     intersections[id].isActive = true;
-    intersections[id].traffic_density_ns = 0;
-    intersections[id].traffic_density_ew = 0;
+    intersections[id].traffic_density_ns = rand() % 11;
+    intersections[id].traffic_density_ew = rand() % 11;
+    intersections[id].green_ns = BASE_GREEN_DURATION;
+    intersections[id].green_ew = BASE_GREEN_DURATION;
     pthread_mutex_init(&intersections[id].mutex, NULL);
+    pthread_cond_init(&intersections[id].cond, NULL);
 }
 
 void* controlIntersection(void* arg) {
     Intersection* intersection = (Intersection*)arg;
-    int cycle_count = 0;
-    
     while (intersection->isActive) {
         pthread_mutex_lock(&intersection->mutex);
+        updateTrafficDensity(intersection);
+        adjustTiming(intersection);
         
-        // Update traffic density every 5 cycles
-        if (cycle_count % 5 == 0) {
-            updateTrafficDensity(intersection);
-        }
-        
-        // Main traffic light logic
-        if (intersection->northSouth == GREEN) {
-            sleep(GREEN_DURATION);
-            intersection->northSouth = YELLOW;
-        } else if (intersection->northSouth == YELLOW) {
-            sleep(YELLOW_DURATION);
-            intersection->northSouth = RED;
-            intersection->eastWest = GREEN;
-        } else if (intersection->eastWest == GREEN) {
-            sleep(GREEN_DURATION);
-            intersection->eastWest = YELLOW;
-        } else if (intersection->eastWest == YELLOW) {
-            sleep(YELLOW_DURATION);
-            intersection->eastWest = RED;
-            intersection->northSouth = GREEN;
-        }
-        
+        // North-South Green
+        intersection->northSouth = GREEN;
+        intersection->eastWest = RED;
         displayIntersectionStatus(intersection);
-        cycle_count++;
-        
+        logStatus(intersection);
         pthread_mutex_unlock(&intersection->mutex);
+        sleep(intersection->green_ns);
+        
+        pthread_mutex_lock(&intersection->mutex);
+        intersection->northSouth = YELLOW;
+        displayIntersectionStatus(intersection);
+        logStatus(intersection);
+        pthread_mutex_unlock(&intersection->mutex);
+        sleep(YELLOW_DURATION);
+        
+        // East-West Green
+        pthread_mutex_lock(&intersection->mutex);
+        intersection->northSouth = RED;
+        intersection->eastWest = GREEN;
+        displayIntersectionStatus(intersection);
+        logStatus(intersection);
+        pthread_mutex_unlock(&intersection->mutex);
+        sleep(intersection->green_ew);
+        
+        pthread_mutex_lock(&intersection->mutex);
+        intersection->eastWest = YELLOW;
+        displayIntersectionStatus(intersection);
+        logStatus(intersection);
+        pthread_mutex_unlock(&intersection->mutex);
+        sleep(YELLOW_DURATION);
     }
-    
     return NULL;
 }
 
 void updateTrafficDensity(Intersection* intersection) {
-    // Simulate random traffic density (0-10)
     intersection->traffic_density_ns = rand() % 11;
     intersection->traffic_density_ew = rand() % 11;
+}
+
+void adjustTiming(Intersection* intersection) {
+    if (intersection->traffic_density_ns > intersection->traffic_density_ew) {
+        intersection->green_ns = BASE_GREEN_DURATION + 5;
+        intersection->green_ew = BASE_GREEN_DURATION - 5;
+    } else {
+        intersection->green_ns = BASE_GREEN_DURATION - 5;
+        intersection->green_ew = BASE_GREEN_DURATION + 5;
+    }
 }
 
 const char* getStateString(LightState state) {
@@ -103,38 +122,55 @@ const char* getStateString(LightState state) {
 
 void displayIntersectionStatus(Intersection* intersection) {
     printf("\nIntersection %d Status:\n", intersection->id);
-    printf("North-South: %s (Traffic Density: %d/10)\n", 
+    printf("North-South: %s (Traffic Density: %d/10, Green Time: %ds)\n", 
            getStateString(intersection->northSouth),
-           intersection->traffic_density_ns);
-    printf("East-West: %s (Traffic Density: %d/10)\n",
+           intersection->traffic_density_ns,
+           intersection->green_ns);
+    printf("East-West: %s (Traffic Density: %d/10, Green Time: %ds)\n",
            getStateString(intersection->eastWest),
-           intersection->traffic_density_ew);
+           intersection->traffic_density_ew,
+           intersection->green_ew);
     printf("----------------------------------------\n");
+}
+
+void logStatus(Intersection* intersection) {
+    FILE* logFile = fopen("traffic_log.txt", "a");
+    if (logFile) {
+        fprintf(logFile, "Intersection %d: NS: %s (%d), EW: %s (%d)\n",
+                intersection->id,
+                getStateString(intersection->northSouth), intersection->traffic_density_ns,
+                getStateString(intersection->eastWest), intersection->traffic_density_ew);
+        fclose(logFile);
+    }
 }
 
 void cleanupIntersection(Intersection* intersection) {
     intersection->isActive = false;
     pthread_mutex_destroy(&intersection->mutex);
+    pthread_cond_destroy(&intersection->cond);
 }
 
 int main() {
     srand(time(NULL));
     pthread_t threads[MAX_INTERSECTIONS];
+    int num_intersections;
     
-    // Initialize and start intersections
-    printf("Traffic Light Simulator Starting...\n");
-    printf("Initializing 3 intersections...\n\n");
+    printf("Enter number of intersections (max %d): ", MAX_INTERSECTIONS);
+    scanf("%d", &num_intersections);
+    if (num_intersections > MAX_INTERSECTIONS || num_intersections <= 0) {
+        num_intersections = 3; // Default value
+    }
     
-    for (int i = 0; i < 3; i++) {
+    printf("Initializing %d intersections...\n\n", num_intersections);
+    
+    for (int i = 0; i < num_intersections; i++) {
         initializeIntersection(i);
         pthread_create(&threads[i], NULL, controlIntersection, &intersections[i]);
         active_intersections++;
     }
     
-    // Run simulation for 2 minutes
     sleep(120);
     
-    // Cleanup and exit
     printf("\nShutting down simulator...\n");
     for (int i = 0; i < active_intersections; i++) {
         cleanupIntersection(&intersections[i]);
